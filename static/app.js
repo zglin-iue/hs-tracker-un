@@ -3,9 +3,14 @@
   const yearInput = document.getElementById('target-year');
   const hsCodeFile = document.getElementById('hs-code-file');
   const convertButton = document.getElementById('convert-button');
+  const exportButton = document.getElementById('export-button');
   const formMessage = document.getElementById('form-message');
   const pathTable = document.getElementById('path-table');
   const targetResults = document.getElementById('target-results');
+  const targetPageSize = 3;
+  let targetPage = 1;
+  let targetPageCount = 1;
+  let targetCodeResults = [];
 
   function escapeHtml(value) {
     return String(value).replace(/[&<>'"]/g, function (character) {
@@ -38,7 +43,7 @@
   }
 
   function renderPath(result) {
-    const results = result.results || [result];
+    const results = (result.results || [result]).slice(0, 1);
     pathTable.innerHTML = results.map(function (pathResult, pathIndex) {
       const columns = pathResult.versions.map(function (version) {
         const codes = version.codes.length
@@ -124,32 +129,61 @@
   }
 
   function renderTarget(result) {
-    const codeResults = result.results || [result];
-    targetResults.innerHTML = codeResults.map(function (codeResult) {
+    targetCodeResults = result.results || [result];
+    targetPageCount = Math.max(1, Math.ceil(targetCodeResults.length / targetPageSize));
+    targetPage = Math.min(targetPage, targetPageCount);
+    const pageStart = (targetPage - 1) * targetPageSize;
+    const codeResults = targetCodeResults.slice(pageStart, pageStart + targetPageSize);
+    const firstMappings = targetCodeResults[0] && (targetCodeResults[0].target_results || [{
+      target_year: targetCodeResults[0].target_year,
+      target_label: targetCodeResults[0].target_label,
+      target_codes: targetCodeResults[0].target_codes,
+    }]);
+    const yearColumns = (firstMappings || []).map(function (mapping) {
+      return { year: mapping.target_year, label: mapping.target_label };
+    });
+    const headerHtml = yearColumns.map(function (column) {
+      return '<th scope="col"><span class="target-year-heading">' + escapeHtml(column.year) + '</span>'
+        + '<span class="target-version-heading">' + escapeHtml(column.label) + '</span></th>';
+    }).join('');
+    const rowHtml = codeResults.map(function (codeResult) {
       const mappings = codeResult.target_results || [{
         target_year: codeResult.target_year,
         target_label: codeResult.target_label,
         target_codes: codeResult.target_codes,
       }];
-      const mappingHtml = mappings.map(function (mapping) {
-        const codes = mapping.target_codes.length
-          ? mapping.target_codes.map(function (code) {
-              return '<div class="target-code-pill">' + escapeHtml(code) + '</div>';
-            }).join('')
-          : '<div class="target-placeholder">该年份没有匹配代码</div>';
-        return '<div class="target-result">'
-          + '<div class="target-summary">'
-          + '<div><span class="eyebrow">目标年份</span><strong>' + escapeHtml(mapping.target_year) + '</strong></div>'
-          + '<div class="target-version-label">' + escapeHtml(mapping.target_label) + '</div>'
-          + '</div>'
-          + '<div class="target-code-list">' + codes + '</div>'
-          + '</div>';
+      const mappingsByYear = {};
+      mappings.forEach(function (mapping) { mappingsByYear[String(mapping.target_year)] = mapping; });
+      const cells = yearColumns.map(function (column) {
+        const mapping = mappingsByYear[String(column.year)];
+        const codes = mapping && mapping.target_codes && mapping.target_codes.length
+          ? '<div class="target-table-code-stack">' + mapping.target_codes.map(function (code) {
+              return '<span class="target-code-pill">' + escapeHtml(code) + '</span>';
+            }).join('') + '</div>'
+          : '<span class="target-table-empty">—</span>';
+        return '<td>' + codes + '</td>';
       }).join('');
-      return '<div class="target-code-group">'
-        + '<div class="target-code-label">HS Code ' + escapeHtml(codeResult.input_code) + '</div>'
-        + mappingHtml
-        + '</div>';
+      return '<tr><th scope="row" class="target-input-code">' + escapeHtml(codeResult.input_code) + '</th>' + cells + '</tr>';
     }).join('');
+    const resultHtml = '<div class="target-table-wrapper"><table class="target-mapping-table">'
+      + '<thead><tr><th scope="col" class="target-input-heading">输入 HSCode</th>' + headerHtml + '</tr></thead>'
+      + '<tbody>' + rowHtml + '</tbody>'
+      + '</table></div>';
+    const paginationHtml = targetPageCount > 1
+      ? '<div class="target-pagination" aria-label="目标年份结果分页">'
+        + '<button type="button" class="pagination-button" data-page-action="previous"' + (targetPage === 1 ? ' disabled' : '') + '>上一页</button>'
+        + '<label class="pagination-jump">第 <input class="pagination-input" type="number" min="1" max="' + targetPageCount + '" value="' + targetPage + '" aria-label="跳转页码"> / ' + targetPageCount + ' 页</label>'
+        + '<button type="button" class="pagination-button" data-page-action="next"' + (targetPage === targetPageCount ? ' disabled' : '') + '>下一页</button>'
+        + '</div>'
+      : '';
+    targetResults.innerHTML = resultHtml + paginationHtml;
+  }
+
+  function goToTargetPage(page) {
+    const nextPage = Number.parseInt(page, 10);
+    if (!Number.isFinite(nextPage)) return;
+    targetPage = Math.max(1, Math.min(targetPageCount, nextPage));
+    renderTarget({ results: targetCodeResults });
   }
 
   async function convert() {
@@ -169,24 +203,12 @@
       const payload = await response.json();
       if (!response.ok || !payload.ok) throw new Error(payload.error || '转换失败');
       window.__lastConversionResult = payload.result;
+      exportButton.disabled = false;
       renderPath(payload.result);
+      targetPage = 1;
       renderTarget(payload.result);
-      const results = payload.result.results || [payload.result];
-      const inferred = results.filter(function (item) { return item.source_version_inferred; });
-      if (inferred.length) {
-        const messages = inferred.map(function (item) {
-          const candidates = item.source_candidates.map(function (version) {
-            return version.replace(/^H0$/, 'HS92').replace(/^H1$/, 'HS96').replace(/^H2$/, 'HS02').replace(/^H3$/, 'HS07').replace(/^H4$/, 'HS12').replace(/^H5$/, 'HS17').replace(/^H6$/, 'HS22');
-          }).join('、');
-          const prefix = results.length > 1 ? item.input_code + '：' : '';
-          return prefix + '已自动识别来源版本：' + item.source_label + '（候选范围：' + candidates + '）';
-        });
-        formMessage.className = 'form-message info';
-        formMessage.textContent = messages.join('；');
-      } else {
-        formMessage.className = 'form-message success';
-        formMessage.textContent = '已完成转换。';
-      }
+      formMessage.className = 'form-message success';
+      formMessage.textContent = '已完成转换。';
     } catch (error) {
       formMessage.className = 'form-message error';
       formMessage.textContent = error.message;
@@ -195,11 +217,72 @@
     }
   }
 
+  function downloadFilename(response) {
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    if (encoded) return decodeURIComponent(encoded[1]);
+    const plain = disposition.match(/filename="?([^";]+)"?/i);
+    return plain ? plain[1] : 'HS_Code_映射结果.xlsx';
+  }
+
+  async function exportExcel() {
+    if (!window.__lastConversionResult) return;
+    exportButton.disabled = true;
+    exportButton.textContent = '正在导出…';
+    try {
+      const response = await fetch('/api/export-excel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          codes: codeInput.value,
+          target_years: yearInput.value,
+          source_version: 'AUTO',
+        }),
+      });
+      if (!response.ok) {
+        const payload = await response.json();
+        throw new Error(payload.error || '导出失败');
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = downloadFilename(response);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      formMessage.className = 'form-message success';
+      formMessage.textContent = 'Excel 已导出。';
+    } catch (error) {
+      formMessage.className = 'form-message error';
+      formMessage.textContent = error.message;
+    } finally {
+      exportButton.disabled = false;
+      exportButton.textContent = '导出excel';
+    }
+  }
+
   convertButton.addEventListener('click', convert);
+  exportButton.addEventListener('click', exportExcel);
+  targetResults.addEventListener('click', function (event) {
+    const button = event.target.closest('[data-page-action]');
+    if (!button || button.disabled) return;
+    goToTargetPage(targetPage + (button.dataset.pageAction === 'next' ? 1 : -1));
+  });
+  targetResults.addEventListener('change', function (event) {
+    if (event.target.matches('.pagination-input')) goToTargetPage(event.target.value);
+  });
+  targetResults.addEventListener('keydown', function (event) {
+    if (event.key === 'Enter' && event.target.matches('.pagination-input')) {
+      event.preventDefault();
+      goToTargetPage(event.target.value);
+    }
+  });
   window.addEventListener('resize', function () {
     const result = window.__lastConversionResult;
     if (result) {
-      const results = result.results || [result];
+      const results = (result.results || [result]).slice(0, 1);
       requestAnimationFrame(function () {
         pathTable.querySelectorAll('.path-visualizer').forEach(function (visualizer, index) {
           drawEdges(results[index], visualizer);

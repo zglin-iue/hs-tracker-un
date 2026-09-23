@@ -33,10 +33,22 @@ POST /api/upload-hscodes
 Content-Type: multipart/form-data
 ```
 
-支持 `.csv` 和 `.xlsx`，自动识别 HSCode、HS Code、cmdCode、商品编码等列，或从单列数字数据中提取六位代码。
+支持 `.csv` 和 `.xlsx`。上传文件必须包含列名 `HSCode`，程序从该列提取六位代码；不再自动猜测其他列。
+
+导出接口：
+
+```http
+POST /api/export-excel
+Content-Type: application/json
+
+{"codes":"010110 390760","target_years":"2005 2010"}
+```
+
+单个目标年份返回对应的 `.xlsx` 文件；多个目标年份返回 ZIP，内部文件按 `年份_HS版本.xlsx` 命名。英文描述直接读取项目内 UNSD 官方完整 HS 描述表的对应版本。UNSD 官方跨版本描述文件不提供统一中文 HS 描述，且不同国家税则的中文名称不能替代目标版本，因此中文描述列暂时留空。
 
 ## 来源
 
 - UN Statistics classification: <https://unstats.un.org/unsd/classifications/Econ>
+- UNSD official HS codes and descriptions: <https://unstats.un.org/unsd/classifications/Econ/download/In%20Text/HSCodeandDescription.xlsx>
 - WTO HS Tracker: <https://hstracker.wto.org/>
 - Harvard conversion weights: 由项目内 `data/conversion_weights` 提供。

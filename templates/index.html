@@ -20,12 +20,15 @@
         <div class="field">
           <label for="hs-code"><span class="label-icon green"><span class="icon-glyph">📄</span></span>HS Code</label>
           <div class="code-input-row">
-            <input id="hs-code" type="text" inputmode="numeric" autocomplete="off" placeholder="例如：010110 390760" value="010110">
-            <label class="upload-code-button">
-              <input id="hs-code-file" type="file" accept=".csv,.xlsx">
-              <span class="upload-code-icon">⇧</span>
-              <span class="upload-code-label">上传 HSCode</span>
-            </label>
+            <input id="hs-code" type="text" inputmode="numeric" autocomplete="off" placeholder="例如：010110 390760" value="">
+            <div class="upload-code-group">
+              <label class="upload-code-button">
+                <input id="hs-code-file" type="file" accept=".csv,.xlsx">
+                <span class="upload-code-icon">⇧</span>
+                <span class="upload-code-label">上传 HSCode</span>
+              </label>
+              <div class="upload-code-note">确保列名为HSCode</div>
+            </div>
           </div>
         </div>
 
@@ -71,6 +74,7 @@
           <div>
             <h2>目标年份映射结果</h2>
           </div>
+          <button id="export-button" class="export-button" type="button" disabled>导出excel</button>
         </div>
         <div id="target-results" class="target-results">
           <div class="target-placeholder">转换后显示目标代码</div>

@@ -8,9 +8,12 @@ from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pandas as pd
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_file
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -35,8 +38,10 @@ VERSION_YEARS = {
 }
 SOURCE_LINKS = {
     "un_statistics": "https://unstats.un.org/unsd/classifications/Econ",
+    "un_hs_descriptions": "https://unstats.un.org/unsd/classifications/Econ/download/In%20Text/HSCodeandDescription.xlsx",
     "wto_hs_tracker": "https://hstracker.wto.org/",
 }
+OFFICIAL_DESCRIPTION_WORKBOOK = PROJECT_ROOT / "data" / "official_hs_descriptions" / "HSCodeandDescription.xlsx"
 
 
 def resolve_weights_dir() -> Path:
@@ -119,32 +124,10 @@ def _normalize_uploaded_code(value: Any) -> str | None:
 
 
 def extract_uploaded_hs_codes(frame: pd.DataFrame) -> list[str]:
-    candidate_names = {
-        "cmdcode", "commoditycode", "hscode", "hs", "hs6", "productcode",
-        "商品编码", "海关编码", "税则号", "编码",
-    }
-    for column in frame.columns:
-        normalized_name = re.sub(r"[\s_-]+", "", str(column).strip().lower())
-        if normalized_name in candidate_names:
-            codes = [_normalize_uploaded_code(value) for value in frame[column].tolist()]
-            codes = list(dict.fromkeys(code for code in codes if code))
-            if codes:
-                return codes
-
-    best_codes: list[str] = []
-    best_score = (-1.0, -1)
-    for column in frame.columns:
-        values = [_normalize_uploaded_code(column)]
-        values.extend(_normalize_uploaded_code(value) for value in frame[column].tolist())
-        values = [value for value in values if value]
-        if not values:
-            continue
-        codes = list(dict.fromkeys(values))
-        score = (len(codes) / len(values), len(codes))
-        if score > best_score:
-            best_score = score
-            best_codes = codes
-    return best_codes
+    if "HSCode" not in frame.columns:
+        raise ConversionError("上传文件必须包含列名 HSCode。")
+    codes = [_normalize_uploaded_code(value) for value in frame["HSCode"].tolist()]
+    return list(dict.fromkeys(code for code in codes if code))
 
 
 def read_uploaded_hs_codes(file_storage) -> list[str]:
@@ -175,12 +158,18 @@ def read_uploaded_hs_codes(file_storage) -> list[str]:
         sheet_frames = {"csv": frame}
 
     codes: list[str] = []
+    matched_sheet = False
     for frame in sheet_frames.values():
+        if "HSCode" not in frame.columns:
+            continue
+        matched_sheet = True
         for code in extract_uploaded_hs_codes(frame):
             if code not in codes:
                 codes.append(code)
+    if not matched_sheet:
+        raise ConversionError("上传文件必须包含列名 HSCode。")
     if not codes:
-        raise ConversionError("文件中未找到有效的六位 HS Code。")
+        raise ConversionError("HSCode 列中未找到有效的六位 HS Code。")
     return codes
 
 
@@ -433,6 +422,114 @@ def build_multi_year_conversion(code: str, source_version: str | None, target_ye
     return result
 
 
+@lru_cache(maxsize=8)
+def load_official_english_descriptions(version: str) -> dict[str, str]:
+    """Load six-digit English descriptions from the official UNSD workbook."""
+    if version not in VERSION_ORDER:
+        raise ConversionError(f"不支持的 HS 版本：{version}")
+    if not OFFICIAL_DESCRIPTION_WORKBOOK.exists():
+        raise ConversionError(f"缺少官方 HS 描述文件：{OFFICIAL_DESCRIPTION_WORKBOOK.name}")
+    try:
+        frame = pd.read_excel(
+            OFFICIAL_DESCRIPTION_WORKBOOK,
+            sheet_name=VERSION_LABELS[version],
+            dtype=str,
+            engine="openpyxl",
+            usecols=["Code", "Description", "Level", "IsBasicLevel"],
+        )
+    except Exception as exc:  # pragma: no cover - surfaced by the export endpoint
+        raise ConversionError(f"读取官方 HS 描述文件失败：{exc}") from exc
+
+    descriptions: dict[str, str] = {}
+    for _, row in frame.iterrows():
+        raw_code = row.get("Code")
+        if pd.isna(raw_code):
+            continue
+        raw_code = str(raw_code).strip()
+        if not re.fullmatch(r"\d{6}", raw_code):
+            continue
+        try:
+            code = normalize_code(str(raw_code))
+        except ConversionError:
+            continue
+        description = row.get("Description")
+        if not pd.isna(description):
+            descriptions[code] = str(description).strip()
+    return descriptions
+
+
+def descriptions_for_code(code: str, version: str) -> tuple[str, str]:
+    """Return the exact target-version English description and an empty Chinese field.
+
+    UNSD's official all-version workbook provides English descriptions. It does
+    not provide a universal Chinese HS description table. A Chinese tariff
+    table from one country/version cannot be substituted for another HS
+    version, so the export keeps the Chinese column empty until a matching
+    official source is available for that exact version.
+    """
+    english = load_official_english_descriptions(version).get(normalize_code(code), "")
+    return english, ""
+
+
+def export_rows(results: list[dict[str, Any]], target_year: int) -> tuple[str, list[list[str]]]:
+    target_version = year_to_version(target_year)
+    version_name = f"HS{VERSION_YEARS[target_version]}"
+    codes: list[str] = []
+    for result in results:
+        for mapping in result.get("target_results", []):
+            if mapping["target_year"] != target_year:
+                continue
+            for code in mapping.get("target_codes", []):
+                if code not in codes:
+                    codes.append(code)
+
+    rows = []
+    for code in codes:
+        english, chinese = descriptions_for_code(code, target_version)
+        rows.append([code, english, chinese])
+    return version_name, rows
+
+
+def create_export_workbook(version_name: str, rows: list[list[str]]) -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "HS映射结果"
+    sheet.append([f"{version_name} code", "含铜产品英文描述", "含铜产品中文描述"])
+    for row in rows:
+        sheet.append(row)
+
+    header_fill = PatternFill(fill_type="solid", fgColor="E8F1FC")
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for row in sheet.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = sheet.dimensions
+    sheet.column_dimensions["A"].width = 18
+    sheet.column_dimensions["B"].width = 58
+    sheet.column_dimensions["C"].width = 58
+
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def parse_conversion_payload(payload: dict[str, Any]) -> tuple[list[str], list[int], list[dict[str, Any]]]:
+    raw_codes = payload.get("codes", payload.get("code"))
+    codes = parse_hs_codes(raw_codes)
+    raw_years = payload.get("target_years", payload.get("target_year"))
+    target_years = parse_target_years(raw_years)
+    source_version = str(payload.get("source_version", "AUTO"))
+    results = [
+        build_multi_year_conversion(code, source_version, target_years)
+        for code in codes
+    ]
+    return codes, target_years, results
+
+
 app = Flask(__name__)
 
 
@@ -473,15 +570,7 @@ def upload_hscodes():
 def convert():
     payload = request.get_json(silent=True) or {}
     try:
-        raw_codes = payload.get("codes", payload.get("code"))
-        codes = parse_hs_codes(raw_codes)
-        raw_years = payload.get("target_years", payload.get("target_year"))
-        target_years = parse_target_years(raw_years)
-        source_version = str(payload.get("source_version", "AUTO"))
-        results = [
-            build_multi_year_conversion(code, source_version, target_years)
-            for code in codes
-        ]
+        codes, target_years, results = parse_conversion_payload(payload)
         return jsonify({
             "ok": True,
             "result": {
@@ -495,6 +584,44 @@ def convert():
     except Exception as exc:  # pragma: no cover - defensive API boundary
         app.logger.exception("HS conversion failed")
         return jsonify({"ok": False, "error": f"转换失败：{exc}"}), 500
+
+
+@app.post("/api/export-excel")
+def export_excel():
+    payload = request.get_json(silent=True) or {}
+    try:
+        _, target_years, results = parse_conversion_payload(payload)
+        files: list[tuple[str, bytes]] = []
+        for target_year in target_years:
+            version_name, rows = export_rows(results, target_year)
+            filename = f"{target_year}_{version_name}.xlsx"
+            files.append((filename, create_export_workbook(version_name, rows)))
+
+        if len(files) == 1:
+            filename, content = files[0]
+            return send_file(
+                io.BytesIO(content),
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                as_attachment=True,
+                download_name=filename,
+            )
+
+        archive = io.BytesIO()
+        with ZipFile(archive, "w", compression=ZIP_DEFLATED) as zip_file:
+            for filename, content in files:
+                zip_file.writestr(filename, content)
+        archive.seek(0)
+        return send_file(
+            archive,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name="HS_Code_映射结果.zip",
+        )
+    except (ConversionError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:  # pragma: no cover - defensive export boundary
+        app.logger.exception("HS Excel export failed")
+        return jsonify({"ok": False, "error": f"导出失败：{exc}"}), 500
 
 
 if __name__ == "__main__":

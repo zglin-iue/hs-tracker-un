@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HS Code映射工具</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <main class="page-shell">
+    <header class="brand-header">
+      <div class="brand-mark" aria-hidden="true"><span class="icon-glyph">📄</span></div>
+      <div>
+        <h1>HS Code映射工具</h1>
+      </div>
+    </header>
+
+    <section class="input-card panel" aria-labelledby="input-title">
+      <div class="field-grid">
+        <div class="field">
+          <label for="hs-code"><span class="label-icon green"><span class="icon-glyph">📄</span></span>HS Code</label>
+          <input id="hs-code" type="text" inputmode="numeric" autocomplete="off" placeholder="例如：010110" value="010110">
+        </div>
+
+        <div class="field">
+          <label for="target-year"><span class="label-icon blue"><span class="icon-glyph">📅</span></span>目标年份</label>
+          <input id="target-year" type="text" inputmode="numeric" autocomplete="off" placeholder="例如：2005 2010 2015 2020" value="">
+        </div>
+
+        <div class="field action-field">
+          <label class="action-label"><span class="label-icon orange"><span class="icon-glyph">⚡</span></span>执行转换</label>
+          <button id="convert-button" class="primary-button" type="button">
+            <span class="button-glyph">▶</span>
+            <span>开始转换</span>
+          </button>
+        </div>
+      </div>
+      <div id="form-message" class="form-message" role="status" aria-live="polite"></div>
+    </section>
+
+    <section id="results" class="results-grid" aria-live="polite">
+      <article class="panel path-card">
+        <div class="section-heading">
+          <div class="heading-icon orange"><span class="icon-glyph">⌘</span></div>
+          <div>
+            <h2>HS 版本变化路径</h2>
+          </div>
+        </div>
+        <div id="path-table" class="path-table" role="table" aria-label="HS 版本变化路径">
+          <div class="path-placeholder">等待转换结果</div>
+        </div>
+        <div class="path-legend" aria-label="路径颜色说明">
+          <span><i class="legend-swatch selected"></i>Selected</span>
+          <span><i class="legend-swatch unchanged"></i>Unchanged</span>
+          <span><i class="legend-swatch reused"></i>Reused</span>
+          <span><i class="legend-swatch new"></i>New</span>
+          <span><i class="legend-swatch other"></i>Other</span>
+        </div>
+      </article>
+
+      <article class="panel target-card">
+        <div class="section-heading">
+          <div class="heading-icon blue"><span class="icon-glyph">📄</span></div>
+          <div>
+            <h2>目标年份映射结果</h2>
+          </div>
+        </div>
+        <div id="target-results" class="target-results">
+          <div class="target-placeholder">转换后显示目标代码</div>
+        </div>
+      </article>
+    </section>
+
+    <footer class="source-footer">
+      <div class="source-copy"><span class="info-icon">ⓘ</span><span>转换关系来源：</span><a href="https://unstats.un.org/unsd/classifications/Econ" target="_blank" rel="noreferrer">UN Statistics</a><span>/</span><a href="https://hstracker.wto.org/" target="_blank" rel="noreferrer">WTO HS Tracker</a><span>/</span><span>Harvard conversion weights</span></div>
+    </footer>
+  </main>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

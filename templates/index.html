@@ -19,12 +19,19 @@
       <div class="field-grid">
         <div class="field">
           <label for="hs-code"><span class="label-icon green"><span class="icon-glyph">📄</span></span>HS Code</label>
-          <input id="hs-code" type="text" inputmode="numeric" autocomplete="off" placeholder="例如：010110" value="010110">
+          <div class="code-input-row">
+            <input id="hs-code" type="text" inputmode="numeric" autocomplete="off" placeholder="例如：010110 390760" value="010110">
+            <label class="upload-code-button">
+              <input id="hs-code-file" type="file" accept=".csv,.xlsx">
+              <span class="upload-code-icon">⇧</span>
+              <span class="upload-code-label">上传 HSCode</span>
+            </label>
+          </div>
         </div>
 
         <div class="field">
           <label for="target-year"><span class="label-icon blue"><span class="icon-glyph">📅</span></span>目标年份</label>
-          <input id="target-year" type="text" inputmode="numeric" autocomplete="off" placeholder="例如：2005 2010 2015 2020" value="">
+          <input id="target-year" type="text" inputmode="numeric" autocomplete="off" placeholder="例如：2005 2010" value="">
         </div>
 
         <div class="field action-field">

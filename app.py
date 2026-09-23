@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import os
 import re
 from collections import defaultdict
@@ -80,6 +82,106 @@ def normalize_code(value: str) -> str:
     if not code.isdigit() or len(code) > 6:
         raise ConversionError("HS Code 必须是 1-6 位数字。")
     return code.zfill(6)
+
+
+def parse_hs_codes(value: Any) -> list[str]:
+    if value is None:
+        raise ConversionError("请输入至少一个 HS Code。")
+    if isinstance(value, list):
+        raw_values = value
+    else:
+        raw_values = re.split(r"[\s,，、;；]+", str(value).strip())
+    codes: list[str] = []
+    for raw_value in raw_values:
+        text = str(raw_value).strip().lstrip("'")
+        if not text:
+            continue
+        try:
+            code = normalize_code(text)
+        except ConversionError as exc:
+            raise ConversionError("HS Code 必须是 1-6 位数字，可输入多个代码。") from exc
+        if code not in codes:
+            codes.append(code)
+    if not codes:
+        raise ConversionError("请输入至少一个 HS Code。")
+    return codes
+
+
+def _normalize_uploaded_code(value: Any) -> str | None:
+    if pd.isna(value):
+        return None
+    text = str(value).strip().lstrip("'")
+    if re.fullmatch(r"\d+\.0", text):
+        text = text[:-2]
+    if not re.fullmatch(r"\d{5,6}", text):
+        return None
+    return text.zfill(6)
+
+
+def extract_uploaded_hs_codes(frame: pd.DataFrame) -> list[str]:
+    candidate_names = {
+        "cmdcode", "commoditycode", "hscode", "hs", "hs6", "productcode",
+        "商品编码", "海关编码", "税则号", "编码",
+    }
+    for column in frame.columns:
+        normalized_name = re.sub(r"[\s_-]+", "", str(column).strip().lower())
+        if normalized_name in candidate_names:
+            codes = [_normalize_uploaded_code(value) for value in frame[column].tolist()]
+            codes = list(dict.fromkeys(code for code in codes if code))
+            if codes:
+                return codes
+
+    best_codes: list[str] = []
+    best_score = (-1.0, -1)
+    for column in frame.columns:
+        values = [_normalize_uploaded_code(column)]
+        values.extend(_normalize_uploaded_code(value) for value in frame[column].tolist())
+        values = [value for value in values if value]
+        if not values:
+            continue
+        codes = list(dict.fromkeys(values))
+        score = (len(codes) / len(values), len(codes))
+        if score > best_score:
+            best_score = score
+            best_codes = codes
+    return best_codes
+
+
+def read_uploaded_hs_codes(file_storage) -> list[str]:
+    filename = (file_storage.filename or "").lower()
+    if not (filename.endswith(".csv") or filename.endswith(".xlsx")):
+        raise ConversionError("请上传 CSV 或 XLSX 格式文件。")
+
+    if filename.endswith(".xlsx"):
+        sheet_frames = pd.read_excel(file_storage, sheet_name=None, dtype=str)
+    else:
+        raw = file_storage.read()
+        frame = None
+        last_error: Exception | None = None
+        for encoding in ("utf-8-sig", "utf-16", "gb18030", "cp1252"):
+            try:
+                text = raw.decode(encoding)
+                try:
+                    delimiter = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|").delimiter
+                except csv.Error:
+                    delimiter = ","
+                frame = pd.read_csv(io.StringIO(text), sep=delimiter, engine="python", dtype=str)
+                break
+            except (UnicodeDecodeError, csv.Error, ValueError, pd.errors.ParserError) as exc:
+                last_error = exc
+        if frame is None:
+            detail = str(last_error) if last_error else "未知错误"
+            raise ConversionError(f"CSV 无法解析：{detail}")
+        sheet_frames = {"csv": frame}
+
+    codes: list[str] = []
+    for frame in sheet_frames.values():
+        for code in extract_uploaded_hs_codes(frame):
+            if code not in codes:
+                codes.append(code)
+    if not codes:
+        raise ConversionError("文件中未找到有效的六位 HS Code。")
+    return codes
 
 
 def year_to_version(year: int) -> str:
@@ -312,6 +414,25 @@ def build_conversion(code: str, source_version: str | None, target_year: int) ->
     }
 
 
+def build_multi_year_conversion(code: str, source_version: str | None, target_years: list[int]) -> dict[str, Any]:
+    results = [
+        build_conversion(code=code, source_version=source_version, target_year=target_year)
+        for target_year in target_years
+    ]
+    result = results[0]
+    result["target_years"] = target_years
+    result["target_results"] = [
+        {
+            "target_year": item["target_year"],
+            "target_version": item["target_version"],
+            "target_label": item["target_label"],
+            "target_codes": item["target_codes"],
+        }
+        for item in results
+    ]
+    return result
+
+
 app = Flask(__name__)
 
 
@@ -333,32 +454,42 @@ def favicon():
     return "", 204
 
 
+@app.post("/api/upload-hscodes")
+def upload_hscodes():
+    try:
+        file_storage = request.files.get("file")
+        if file_storage is None or not file_storage.filename:
+            raise ConversionError("请选择要上传的 CSV 或 XLSX 文件。")
+        codes = read_uploaded_hs_codes(file_storage)
+        return jsonify({"ok": True, "codes": codes})
+    except (ConversionError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:  # pragma: no cover - defensive upload boundary
+        app.logger.exception("HS code upload failed")
+        return jsonify({"ok": False, "error": f"文件处理失败：{exc}"}), 400
+
+
 @app.post("/api/convert")
 def convert():
     payload = request.get_json(silent=True) or {}
     try:
+        raw_codes = payload.get("codes", payload.get("code"))
+        codes = parse_hs_codes(raw_codes)
         raw_years = payload.get("target_years", payload.get("target_year"))
         target_years = parse_target_years(raw_years)
+        source_version = str(payload.get("source_version", "AUTO"))
         results = [
-            build_conversion(
-                code=str(payload.get("code", "")),
-                source_version=str(payload.get("source_version", "AUTO")),
-                target_year=target_year,
-            )
-            for target_year in target_years
+            build_multi_year_conversion(code, source_version, target_years)
+            for code in codes
         ]
-        result = results[0]
-        result["target_years"] = target_years
-        result["target_results"] = [
-            {
-                "target_year": item["target_year"],
-                "target_version": item["target_version"],
-                "target_label": item["target_label"],
-                "target_codes": item["target_codes"],
-            }
-            for item in results
-        ]
-        return jsonify({"ok": True, "result": result})
+        return jsonify({
+            "ok": True,
+            "result": {
+                "input_codes": codes,
+                "target_years": target_years,
+                "results": results,
+            },
+        })
     except (ConversionError, ValueError) as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     except Exception as exc:  # pragma: no cover - defensive API boundary
